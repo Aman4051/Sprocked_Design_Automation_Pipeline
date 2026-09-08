@@ -1,0 +1,11 @@
+# ==============================================================================
+# PRAVAHA MATERIALS DATABASE
+# Flattened structure to match the Python extraction logic natively.
+# ==============================================================================
+
+steel_1045_oem:
+    name: "AISI 1045 Hardened Steel (OEM Sprocket)"
+    density: 7850.0
+    poissons_ratio: 0.29
+    youngs_modulus: 205.0e+9       
+    yield_strength: 850.0e+6

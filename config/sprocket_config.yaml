@@ -1,0 +1,120 @@
+# ==============================================================================
+# PRAVAHA V2 CONFIGURATION — DECOUPLED HOT/COLD PATH ARCHITECTURE
+# SINGLE SOURCE OF TRUTH FOR HIGH-PERFORMANCE TOPOLOGY OPTIMIZATION
+# ==============================================================================
+
+# Tells unified_physics.py exactly which dictionary to pull from the DB
+active_material: "al_7075_t6"
+
+# ==========================================
+# 0. ROOT-LEVEL REDUNDANCIES (HOTFIX)
+# ==========================================
+num_teeth: 41
+pitch_inch: 0.625
+roller_dia_inch: 0.400
+rim_thickness_m: 0.007             
+max_motor_rpm: 14500
+chain_tension_n: 14850.7
+other_sprocket_teeth: 16
+manual_center_distance_m: 0.600
+chain_slack_percentage: 3.0
+chain_misalignment_deg: 2.0
+
+# ==========================================
+# 1. 3D GEOMETRY & ASME B29.1 OVERRIDES
+# ==========================================
+geometry:
+  sprocket_type: 'D'              # 'A' (Flat), 'B' (Unilateral Hub), 'C' (Symmetrical Hub), 'D' (Hubless)
+  force_flat_profile: false        # Forces a completely flat plate without ASME reliefs or hubs
+  pitch_inch: 0.625               
+  chain_width_inch: 0.3125        
+  num_teeth: 41                   
+
+  web_thickness_m: 0.007          
+  tooth_width_m: null             
+  chamfer_depth_m: null           
+  relief_drop_m: null             
+  relief_bevel_m: null            
+  hub_fillet_m: null              
+
+  bore_dia_m: 0.076               
+  hub_projection_m: null          
+  hub_length_m: null              
+  
+  num_bolts: 6                    
+  bolt_pcd_m: 0.100               
+  bolt_dia_m: 0.010            
+
+# ==========================================
+# 2. DRIVETRAIN KINEMATICS & ENVIRONMENT
+# ==========================================
+kinematics:
+  other_sprocket_teeth: 16         
+  manual_center_distance_m: 0.600
+  chain_slack_percentage: 3.0                  
+  roller_dia_inch: 0.400           
+  chain_misalignment_deg: 2.0     
+  chain_stiffness_n_m: 500000.0   # Longitudinal stiffness of a single chain link
+  chain_link_mass_kg: 0.015       # Mass of a single link for impact calculations
+
+powerplant:
+  max_motor_rpm: 14500
+  chain_tension_n: 14850.7         
+  service_factor: 1.5             
+
+tribology:
+  friction_coefficient: 0.05
+
+# ==========================================
+# 3. TOPOLOGY OPTIMIZATION CONSTRAINTS
+# ==========================================
+constraints:
+  target_volume_fraction: 0.40       
+  min_volume_fraction: 0.20       
+  
+  max_in_plane_deflection_m: 2.0e-4  
+  max_axial_deflection_m: 5.0e-4     
+  
+  target_web_fos: 2.20                
+  target_shear_fos: 1.50              
+  minimum_tooth_fos: 1.10             
+  stress_singularity_filter_percentile: 99.8 
+  
+  web_fos_tolerance: 0.15            
+  max_outer_iterations: 30  
+  max_stalled_volume_additions: 3     # Drops volume if FoS plateaus for this many iterations  
+  plateau_min_margin_improvement: 0.015 # The minimum FoS jump required to not trigger a stall warning
+  plateau_scramble_volume_multiplier: 0.75 # Multiplier (e.g., 0.75 = 25% drop) to shatter a stubborn topology
+
+optimization_solver:
+  max_iterations_2d: 150              
+  max_iterations_3d: 0            
+  cg_tolerance: 1.0e-3
+  simp_penalization_exponent: 3.0    
+  penalty_ramp_iterations: 120.0
+  
+  # --- NEW: Pareto Frontier Tuning ---
+  inertia_weight: 0.15               # The starting penalty (Gamma) applied to outer rim mass
+  gamma_tuning_iterations: 10         # How many times the inner loop sweeps Gamma before changing Volume
+
+# ==========================================
+# 4. MANUFACTURING ROUTING & DFM
+# ==========================================
+manufacturing_routing:
+  enable_hub_centering_ring: false 
+  hub_centering_ring_thickness_m: 0.006 
+  cnc_endmill_radius_mm: 1.5    
+  cnc_fillet_multiplier: 1.5      # Generates a minimum corner radius relative to the tool size
+  cnc_simplification_tolerance_mm: 0.05 # Maximum deviation allowed when decimating toolpaths
+  min_structural_web_width_m: 0.012 
+  topping_curve_factor: 0.05      
+
+# ==========================================
+# 5. 3D CONTINUUM MESHING & VRAM CONTROL
+# ==========================================
+continuum_meshing_3d:
+  starting_voxel_size_m: 0.002    
+  tet4_voxel_size_max_m: 0.0035    
+  tet4_voxel_size_min_m: 0.0012
+  profile_resolution_outer: 128   
+  profile_resolution_roller_seat: 32 
