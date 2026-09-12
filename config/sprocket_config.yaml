@@ -13,8 +13,8 @@ num_teeth: 41
 pitch_inch: 0.625
 roller_dia_inch: 0.400
 rim_thickness_m: 0.007             
-max_motor_rpm: 14500
-chain_tension_n: 14850.7
+max_motor_rpm: 7000
+chain_tension_n: 7000
 other_sprocket_teeth: 16
 manual_center_distance_m: 0.600
 chain_slack_percentage: 3.0
@@ -24,7 +24,7 @@ chain_misalignment_deg: 2.0
 # 1. 3D GEOMETRY & ASME B29.1 OVERRIDES
 # ==========================================
 geometry:
-  sprocket_type: 'D'              # 'A' (Flat), 'B' (Unilateral Hub), 'C' (Symmetrical Hub), 'D' (Hubless)
+  sprocket_type: 'A'              # 'A' (Flat), 'B' (Unilateral Hub), 'C' (Symmetrical Hub), 'D' (Hubless)
   force_flat_profile: false        # Forces a completely flat plate without ASME reliefs or hubs
   pitch_inch: 0.625               
   chain_width_inch: 0.3125        
@@ -43,7 +43,7 @@ geometry:
   
   num_bolts: 6                    
   bolt_pcd_m: 0.100               
-  bolt_dia_m: 0.010            
+  bolt_dia_m: 0.008            
 
 # ==========================================
 # 2. DRIVETRAIN KINEMATICS & ENVIRONMENT
@@ -58,8 +58,8 @@ kinematics:
   chain_link_mass_kg: 0.015       # Mass of a single link for impact calculations
 
 powerplant:
-  max_motor_rpm: 14500
-  chain_tension_n: 14850.7         
+  max_motor_rpm: 7000 
+  chain_tension_n: 7000      
   service_factor: 1.5             
 
 tribology:
@@ -68,9 +68,7 @@ tribology:
 # ==========================================
 # 3. TOPOLOGY OPTIMIZATION CONSTRAINTS
 # ==========================================
-constraints:
-  target_volume_fraction: 0.40       
-  min_volume_fraction: 0.20       
+constraints:     
   
   max_in_plane_deflection_m: 2.0e-4  
   max_axial_deflection_m: 5.0e-4     
@@ -78,7 +76,7 @@ constraints:
   target_web_fos: 2.20                
   target_shear_fos: 1.50              
   minimum_tooth_fos: 1.10             
-  stress_singularity_filter_percentile: 99.8 
+  stress_singularity_filter_percentile: 99.9 
   
   web_fos_tolerance: 0.15            
   max_outer_iterations: 30  
@@ -95,7 +93,7 @@ optimization_solver:
   
   # --- NEW: Pareto Frontier Tuning ---
   inertia_weight: 0.15               # The starting penalty (Gamma) applied to outer rim mass
-  gamma_tuning_iterations: 10         # How many times the inner loop sweeps Gamma before changing Volume
+  gamma_tuning_iterations: 20         # How many times the inner loop sweeps Gamma before changing Volume
 
 # ==========================================
 # 4. MANUFACTURING ROUTING & DFM
@@ -106,15 +104,15 @@ manufacturing_routing:
   cnc_endmill_radius_mm: 1.5    
   cnc_fillet_multiplier: 1.5      # Generates a minimum corner radius relative to the tool size
   cnc_simplification_tolerance_mm: 0.05 # Maximum deviation allowed when decimating toolpaths
-  min_structural_web_width_m: 0.012 
+  min_structural_web_width_m: 0.001 
   topping_curve_factor: 0.05      
 
 # ==========================================
 # 5. 3D CONTINUUM MESHING & VRAM CONTROL
 # ==========================================
 continuum_meshing_3d:
-  starting_voxel_size_m: 0.002    
-  tet4_voxel_size_max_m: 0.0035    
+  starting_voxel_size_m: 0.0016    
+  tet4_voxel_size_max_m: 0.0024    
   tet4_voxel_size_min_m: 0.0012
   profile_resolution_outer: 128   
   profile_resolution_roller_seat: 32 
