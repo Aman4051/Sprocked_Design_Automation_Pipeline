@@ -43,6 +43,7 @@ class SprocketCAMExporter:
         
         self.R_pitch_mm = self.pitch_mm / (2.0 * math.sin(math.pi / self.num_teeth))
         
+        # --- THE FIX: Open up the design space by reducing artificial padding ---
         self.boss_rad_mm = self.bolt_dia_mm * 1.0 
         
         # Scale the rim margin relative to the chain pitch, ensuring it doesn't thin out on small sprockets
@@ -177,13 +178,15 @@ class SprocketCAMExporter:
         return geom
 
     def _generate_ai_pockets(self):
-        print("   -> Isolating 3D load paths and applying strict morphological filtering...")
+        print("   -> Isolating 3D load paths and applying strict CNC Toolpath morphological filtering...")
         
         enable_hub_ring = self.config.get('manufacturing_routing', {}).get('enable_hub_centering_ring', True)
         hub_margin_mm = float(self.config.get('manufacturing_routing', {}).get('hub_centering_ring_thickness_m', 0.006)) * 1000.0
 
-        # Hardcode the extraction window to the known physical web thickness + a 1.0mm tolerance band
-        half_web_mm = (self.web_thickness_mm / 2.0) + 1.0  
+        # Extract core structural struts
+        # THE FIX: The web is ALWAYS anchored at Z=0, regardless of asymmetric hub projections.
+        z_mid = 0.0
+        z_thickness = self.web_thickness_mm
         
         strut_shapes = []
         for i, density in enumerate(self.densities):
@@ -191,15 +194,14 @@ class SprocketCAMExporter:
                 nodes_idx = self.elements[i]
                 elem_z = np.mean(self.nodes_mm[nodes_idx, 2])
                 
-                # Accurately isolate elements belonging to the main web plane
-                # by checking absolute distance from Z = 0.0
-                if abs(elem_z) <= half_web_mm:
+                # Extract structure safely inside the core web plane
+                if abs(elem_z - z_mid) <= (z_thickness * 0.40):
                     pts = self.nodes_mm[nodes_idx][:, :2]
                     if len(pts) >= 3:
                         strut_shapes.append(Polygon(pts).convex_hull)
                         
         if not strut_shapes:
-            print("   [⚠️] GEOMETRY WARNING: No solid core elements detected. Reverting to solid blank.")
+            print("   [⚠️] CNC WARNING: No solid core elements detected. Reverting to solid blank.")
             return Polygon()
 
         raw_ai_web = unary_union(strut_shapes)
@@ -209,7 +211,7 @@ class SprocketCAMExporter:
         
         positive_components = [raw_ai_web]
         
-        # --- STRICT HUB & LUG POCKET SEPARATION ---
+        # --- THE FIX: STRICT HUB & LUG POCKET SEPARATION ---
         if self.sprocket_type in ['A', 'B', 'C']:
             # Pockets cannot penetrate the solid shaft hub, NOR the hub fillet
             blank_inner_radius = self.hub_rad_mm + self.hub_fillet_mm + collar_offset
@@ -222,10 +224,11 @@ class SprocketCAMExporter:
             if enable_hub_ring:
                 safe_bore_radius = max(self.bore_rad_mm + collar_offset, self.bore_rad_mm + hub_margin_mm)
                 positive_components.append(Point(0, 0).buffer(safe_bore_radius))
+            # --- THE FIX: No hub ring ---
             # If the user disables the hub ring on a Type D sprocket, we explicitly DO NOT 
             # pad the central bore. Pockets are free to carve completely up to the void.
 
-        # ---  VIRTUAL WELDING / STRUCTURAL FUSING ---
+        # --- THE FIX: VIRTUAL WELDING / STRUCTURAL FUSING ---
         # Before we carve pockets, we apply a morphological closing to the *solid* parts.
         # This acts as a virtual welding pass, flooding sharp intersections between the 
         # AI struts, the bolt bosses, and the outer rim with solid metal fillets. 
@@ -233,7 +236,7 @@ class SprocketCAMExporter:
         fuse_radius = self.min_web_width_mm / 2.0
         raw_solid_web_padded = unary_union(positive_components).buffer(fuse_radius, join_style=1).buffer(-fuse_radius, join_style=1)
         
-       # --- High-Resolution Boundary Buffers ---
+       # --- THE FIX: High-Resolution Boundary Buffers ---
         # Forces a perfectly smooth circular rim instead of a jagged default polygon
         carvable_blank = Point(0, 0).buffer(safe_rim_radius, resolution=128).difference(
             Point(0, 0).buffer(blank_inner_radius, resolution=128)
@@ -279,22 +282,20 @@ class SprocketCAMExporter:
              print(f"   [⚠️] CNC LOGIC: A {self.tool_radius_mm*2:.2f}mm tool cannot fit in the current structure.")
              return Polygon() 
              
-        # --- Morphological P-NUMB Filleting (Adds Metal) ---
-        # Shrinks and swells the pockets to round off their outward points.
+        # --- THE FIX: Morphological P-NUMB Filleting (Adds Metal) ---
+        # Swells and shrinks the pockets to round off their outward points.
         # This explicitly ADDs solid metal fillets to the sharp inner roots of the structural web.
-        multiplier = float(self.config.get('manufacturing_routing', {}).get('cnc_fillet_multiplier', 1.5))
-        fillet_radius = self.tool_radius_mm * multiplier
-        machinable_pockets = machinable_pockets.buffer(-fillet_radius, join_style=1).buffer(fillet_radius, join_style=1)
+        fillet_radius = self.tool_radius_mm * 1.5
+        machinable_pockets = machinable_pockets.buffer(fillet_radius, join_style=1).buffer(-fillet_radius, join_style=1)
 
         print("   -> Applying continuous curvature smoothing to physical toolpaths...")
         smoothed_pockets = self._feature_preserving_laplacian_smooth(machinable_pockets, iterations=60)
 
-        # ---  Gentle Decimation ---
-        # Preserves the smooth Laplacian curves and prevents the exporter from 
-        # re-introducing jagged polygonal edges based on user configuration.
+        # --- THE FIX: Gentle Decimation ---
+        # Lowered tolerance from 0.75mm to 0.05mm to preserve the smooth Laplacian curves 
+        # and prevent the exporter from re-introducing jagged polygonal edges.
         print("   -> Extracting clean boundary points for 3D extrusion...")
-        export_tol = float(self.config.get('manufacturing_routing', {}).get('cnc_simplification_tolerance_mm', 0.05))
-        smoothed_pockets = smoothed_pockets.simplify(tolerance=export_tol, preserve_topology=True)
+        smoothed_pockets = smoothed_pockets.simplify(tolerance=0.05, preserve_topology=True)
 
         # --- HARD CONNECTIVITY GATE ---
         # Never silently ship a sprocket that pocket-carving cut into disjoint pieces.
@@ -382,12 +383,15 @@ class SprocketCAMExporter:
             cx, cy = self.hub_rad_mm + Rf, Z_web + Rf
             mx = cx + Rf * math.cos(math.radians(225))
             my = cy + Rf * math.sin(math.radians(225))
+            
             wp = wp.polyline(pts).threePointArc((mx, my), (self.hub_rad_mm, Z_web + Rf))
-            wp = wp.lineTo(self.hub_rad_mm, L - Z_web).lineTo(self.bore_rad_mm, L - Z_web).close()
+            # THE FIX: Hub extends exactly to Z_web + H
+            wp = wp.lineTo(self.hub_rad_mm, Z_web + H).lineTo(self.bore_rad_mm, Z_web + H).close()
             blank = wp.revolve(360, (0,0,0), (0,1,0))
             
         elif self.sprocket_type == 'C':
-            hp = L / 2.0
+            # THE FIX: Use exact H projection instead of arbitrary L
+            hp = H / 2.0
             pts1 = [(self.bore_rad_mm, -hp), (self.hub_rad_mm, -hp), (self.hub_rad_mm, -Z_web - Rf)]
             wp = wp.polyline(pts1)
             cx1, cy1 = self.hub_rad_mm + Rf, -Z_web - Rf
@@ -468,7 +472,8 @@ class SprocketCAMExporter:
         cutter_len = max(L, Tooth_W_mm) * 2.0
         gap_solid = gap_wire.extrude(cutter_len).translate((0, 0, -cutter_len/2.0)).val()
 
-        # --- THE INDUSTRY STANDARD: Sequential CNC Booleans ---
+        # --- THE INDUSTRY STANDARD FIX: Sequential CNC Booleans ---
+        # Instead of fusing 39 overlapping tools into a 4,000-face Frankenstein tool,
         # we subtract them iteratively, exactly like a real CNC machine.
         print("   -> Machining ANSI B29.1 Teeth sequentially...")
         for i in range(N):
@@ -524,6 +529,7 @@ class SprocketCAMExporter:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Extract clean structural 3D STEP profile from PRAVAHA results.")
     
+    # --- THE FIX: Make the run name a mandatory positional argument ---
     parser.add_argument("run_name", type=str, help="The exact name of the run folder (e.g., run_20260726_143000)")
     args = parser.parse_args()
 
@@ -536,7 +542,7 @@ if __name__ == "__main__":
     if not os.path.exists(target_dir):
         raise FileNotFoundError(f"❌ Could not find the specified run directory: {target_dir}")
 
-    # --- Explicitly target the Champion Trial array ---
+    # --- THE FIX: Explicitly target the Champion Trial array ---
     npz_path = os.path.join(target_dir, "topology_3d_BEST_TRIAL.npz")
     
     if not os.path.exists(npz_path):

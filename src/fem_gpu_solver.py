@@ -19,6 +19,8 @@ class FEMSolverGPU:
         self.nu = np.float64(self.payload['nu'])
         self.thickness = float(self.config.get('geometry', {}).get('web_thickness_m', 0.007))
         self.p_penalty = float(config.get('optimization_solver', {}).get('simp_penalization_exponent', 3.0))
+        self.cg_tol = float(config.get('optimization_solver', {}).get('cg_tolerance', 1e-3))
+        self.cg_maxiter = int(config.get('optimization_solver', {}).get('cg_max_iterations', 2500))
         
         self.num_nodes = len(self.mesh['nodes'])
         self.num_elements = len(self.mesh['elements'])
@@ -42,8 +44,28 @@ class FEMSolverGPU:
             edof[:, 2*i+1] = self.mesh['elements'][:, i] * 2 + 1
             
         self.edof_gpu = cp.array(edof)
-        self.iK_gpu = cp.array(np.kron(edof, np.ones((6,1))).flatten())
-        self.jK_gpu = cp.array(np.kron(edof, np.ones((1,6))).flatten())
+        self.iK_gpu = cp.array(np.kron(edof, np.ones((6,1), dtype=np.int32)).flatten())
+        self.jK_gpu = cp.array(np.kron(edof, np.ones((1,6), dtype=np.int32)).flatten())
+
+        # Map global DOF indices to sequential free DOF indices
+        global_to_free = cp.full(self.num_dofs, -1, dtype=cp.int32)
+        global_to_free[self.free_dofs] = cp.arange(len(self.free_dofs), dtype=cp.int32)
+        
+        # Translate the element assembly indices
+        iK_free_mapped = global_to_free[self.iK_gpu]
+        jK_free_mapped = global_to_free[self.jK_gpu]
+        
+        # Create a boolean mask for entries that do not touch fixed boundaries
+        self.free_mask_gpu = (iK_free_mapped >= 0) & (jK_free_mapped >= 0)
+        
+        # Store the permanently reduced and re-mapped COO arrays
+        self.iK_free_gpu = iK_free_mapped[self.free_mask_gpu]
+        self.jK_free_gpu = jK_free_mapped[self.free_mask_gpu]
+        self.num_free = len(self.free_dofs)
+        
+        # Initialize Warm-Start buffers
+        self.U_prev_BOL = None
+        self.U_prev_EOL = None
 
     def _precompute_tri3_kinematics(self):
         """Vectorized 2D Plane-Stress Tensor Assembly."""
@@ -85,22 +107,21 @@ class FEMSolverGPU:
         self.Ke0_gpu = cp.array(Ke0, dtype=cp.float64)
         print("      -> 2D Tri3 Tensors Compiled and Loaded to VRAM.")
 
-    def assemble_and_solve(self, densities, F_ext_gpu, is_BOL=True):
-        """Executes the Preconditioned Conjugate Gradient (JPCG) loop in 2D."""
-        densities_gpu = cp.array(densities, dtype=cp.float64)
+    def assemble_stiffness(self, densities):
+        """Builds K_free once per OC iteration using the pre-sliced COO pattern."""
+        densities_gpu = cp.asarray(densities, dtype=cp.float64)
         
         # --- DYNAMIC PENALTY ---
-        # Fetch the actively ramping p_penalty from the instance, rather than a static init value
         penalty = densities_gpu ** self.p_penalty
         Ke_penalized = self.Ke0_gpu * penalty[:, cp.newaxis, cp.newaxis]
         
-        K_global = cupsp.coo_matrix(
-            (Ke_penalized.flatten(), (self.iK_gpu, self.jK_gpu)),
-            shape=(self.num_dofs, self.num_dofs)
-        ).tocsr()
+        Ke_flat = Ke_penalized.flatten()
         
-        K_free = K_global[self.free_dofs, :][:, self.free_dofs]
-        F_free = F_ext_gpu[self.free_dofs]
+        # Assemble directly into the reduced free-DOF space
+        K_free = cupsp.coo_matrix(
+            (Ke_flat[self.free_mask_gpu], (self.iK_free_gpu, self.jK_free_gpu)),
+            shape=(self.num_free, self.num_free)
+        ).tocsr()
         
         diag_K = K_free.diagonal()
         M_inv = 1.0 / cp.maximum(diag_K, 1e-12)
@@ -118,25 +139,54 @@ class FEMSolverGPU:
             return z
             
         M_op = cplinalg.LinearOperator(
-            shape=(len(self.free_dofs), len(self.free_dofs)),
+            shape=(self.num_free, self.num_free),
             matvec=poly_precond_2d,
             dtype=cp.float64
         )
         
-        U_free, info = cplinalg.cg(K_free, F_free, M=M_op, tol=1e-3, maxiter=2500)
+        return K_free, M_op
+
+    def solve_system(self, K_free, M_op, F_ext_gpu, is_BOL=True, progress=1.0):
+        """Executes CG with Warm-Starting capabilities and Adaptive Tolerances."""
+        solve_start = time.time()
+        F_free = F_ext_gpu[self.free_dofs]
         
-        if info > 0:
-            print(f"      [⚠] 2D CG Solver halted at {info} iterations (Sliver Matrix Singularity).")
-            pass
+        x0_guess = None
+        if is_BOL and self.U_prev_BOL is not None:
+            x0_guess = self.U_prev_BOL[self.free_dofs]
+        elif not is_BOL and self.U_prev_EOL is not None:
+            x0_guess = self.U_prev_EOL[self.free_dofs]
+            
+        class CGTracker:
+            def __init__(self): self.iters = 0
+            def __call__(self, xk): self.iters += 1
+        tracker = CGTracker()
+        
+        # --- THE FIX: Adaptive Tolerance Decay ---
+        # Starts loose (e.g., 0.01) and tightens to the YAML target as progress approaches 1.0
+        dynamic_tol = self.cg_tol + (0.01 - self.cg_tol) * (1.0 - progress)
+        
+        U_free, info = cplinalg.cg(K_free, F_free, M=M_op, x0=x0_guess, tol=dynamic_tol, maxiter=self.cg_maxiter, callback=tracker)
+        
+        if tracker.iters == 0 and info > 0:
+            tracker.iters = info
             
         U_global = cp.zeros(self.num_dofs, dtype=cp.float64)
         U_global[self.free_dofs] = U_free
         
-        return U_global
+        if is_BOL:
+            self.U_prev_BOL = U_global.copy()
+        else:
+            self.U_prev_EOL = U_global.copy()
+            
+        solve_time = time.time() - solve_start
+        print(f"      -> 2D Polynomial-PCG Solve ({'BOL' if is_BOL else 'EOL'}): {solve_time:.3f} sec. ({tracker.iters} iters, tol={dynamic_tol:.1e})")
+            
+        return U_global, tracker.iters
 
     def calculate_sensitivities(self, U_global, densities):
         """Analytical Adjoint Method: Evaluates structural compliance sensitivity."""
-        densities_gpu = cp.array(densities, dtype=cp.float64)
+        densities_gpu = cp.asarray(densities, dtype=cp.float64)
         
         U_elem = U_global[self.edof_gpu]
         Ke0_u = cp.einsum('eij,ej->ei', self.Ke0_gpu, U_elem)

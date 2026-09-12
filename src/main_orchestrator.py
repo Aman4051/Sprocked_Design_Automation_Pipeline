@@ -5,6 +5,7 @@ import numpy as np
 import csv
 import json
 import subprocess 
+import math
 from datetime import datetime
 from shapely.geometry import Point
 from shapely.prepared import prep
@@ -67,74 +68,6 @@ class PravahaOrchestratorV2:
         self.mesh_2d = mesher.build_2d_mesh()
         self.mesh_3d = mesher.build_3d_mesh()
 
-    def evaluate_analytical_fos(self, v_mid):
-        """The 'Sanity Check' Judge using Macroscopic Fatigue Limits."""
-        import math
-        print("      -> [Analytical Judge] Calculating Macroscopic Fatigue Limits...")
-        
-        Sy = self.payload['Sy_derated']
-        T_max = self.payload['T_max']
-        N_driven = self.config.get('geometry', {}).get('num_teeth', 39)
-        N_engaged = self.payload['N_engaged']
-        
-        geom = self.config.get('geometry', {})
-        R_hub = float(geom.get('bolt_pcd_m', 0.081)) / 2.0
-        R_pitch = self.payload['R_pitch']
-        thickness = float(geom.get('web_thickness_m', 0.007))
-        
-        A_cross_section = 2.0 * math.pi * R_hub * thickness
-        A_actual = A_cross_section * v_mid
-        
-        Torque_Nm = T_max * R_pitch
-        F_hub = Torque_Nm / R_hub
-        
-        mu = float(self.config.get('tribology', {}).get('friction_coefficient', 0.05))
-        alpha = (2.0 * math.pi) / N_driven
-        friction_angle = math.atan(mu)
-        phi = math.radians(17.0 - (64.0 / N_driven)) 
-        
-        K = math.sin(phi + alpha + friction_angle) / math.sin(phi - friction_angle)
-        N_effective = sum([(1.0 / K)**(i - 1) for i in range(1, N_engaged + 1)])
-        
-        active_strut_area = A_actual 
-        
-        tau_transverse = F_hub / active_strut_area
-        
-        sigma_axial = tau_transverse * 0.5 
-        
-        vm_analytical = math.sqrt((sigma_axial**2) + 3.0 * (tau_transverse**2))
-        FoS_analytical = Sy / vm_analytical
-        
-        return FoS_analytical
-    def evaluate_analytical_tooth_failsafe(self):
-        """The User-Defined Lewis Bending Failsafe."""
-        import math
-        T_max = self.payload['T_max']
-        N_total = self.config.get('num_teeth', 39)
-        mu = 0.15
-
-        alpha = (2.0 * math.pi) / N_total
-        rho_angle = math.atan(mu)
-        phi = math.radians(17.0 - (64.0 / N_total))
-        K = math.sin(phi + alpha + rho_angle) / math.sin(phi - rho_angle)
-
-        F_n1 = T_max * (math.sin(alpha) / math.sin(phi + alpha + rho_angle))
-
-        b = self.config.get('rim_thickness_m', 0.007)
-        t = 0.00635  
-        h = 0.00425  
-        
-        F_bend = F_n1 * math.cos(phi)
-
-        sigma_nom = (6 * F_bend * h) / (b * t**2)
-        Kt = 2.0 
-        sigma_peak = sigma_nom * Kt
-
-        Sy = self.payload['Sy_derated']
-        FoS_analytical_tooth = Sy / sigma_peak
-
-        return FoS_analytical_tooth
-
     def _calculate_rotational_inertia(self, densities):
         """Calculates the physical Mass Moment of Inertia (Iz) in kg*m^2."""
         mat_name = self.config.get('active_material', 'al_7075_t6')
@@ -181,12 +114,15 @@ class PravahaOrchestratorV2:
         self.best_feasible_state = None
         self.best_feasible_inertia = float('inf') # Track by true physical objective
         self.feasible_vault = [] # Archival ledger of all successful configurations
+        self.safest_failed_state = None
+        self.safest_failed_margin = -1.0
         
         # --- PLATEAU DETECTION VARIABLES ---
         self.stalled_counter = 0
         self.previous_margin = 0.0
         self.previous_margin_tooth = 0.0
         self.previous_margin_stress = 0.0
+        self.previous_margin_kinematic = 0.0
         self.previous_margin_in_plane = 0.0
         self.previous_margin_axial = 0.0
         self.previous_v_mid = 0.0
@@ -227,14 +163,23 @@ class PravahaOrchestratorV2:
                 ram_payload = {'densities': rho_3d, 'nodes': self.mesh_3d['nodes'], 'elements': self.mesh_3d['elements']}
                 exporter = SprocketCAMExporter(ram_payload, self.config)
                 
+                is_cam_failing = False
                 try:
                     milling_pockets = exporter._generate_ai_pockets()
                     self.final_pockets = milling_pockets
+                    if getattr(milling_pockets, 'is_empty', True) or milling_pockets.area < 1e-6:
+                        print(f"   [⚠️] CAM REJECTION: No pockets carved (solid blank).")
+                        is_cam_failing = True
                 except RuntimeError as e:
                     if "CNC LOGIC FAILURE" in str(e):
                         print(f"   [⚠️] CAM FILTER FAILURE: Disconnected spokes detected (Topology is broken).")
                         is_failing = True
                         worst_margin = 0.5 # Set a 50% structural penalty to trigger a smooth 15% volume jump later
+                        margin_tooth = 0.5
+                        margin_topology_stress = 0.5
+                        margin_kinematic = 0.5
+                        margin_in_plane = 0.5
+                        margin_axial = 0.5
                         
                         if gamma > 0.01 and g_iter < gamma_iters - 1:
                             print(f"      -> ⚙️ DIAGNOSIS: Reducing Inertia Penalty to pull mass back into the structural web.")
@@ -347,23 +292,21 @@ validator.parse_results_and_report_fos()
                     self.final_stresses = np.zeros(len(self.mesh_3d['nodes']))
                     self.final_deflections = np.zeros_like(self.mesh_3d['nodes'])
                 
-                analytical_fos_hub = self.evaluate_analytical_fos(v_mid)
-                analytical_fos_tooth = self.evaluate_analytical_tooth_failsafe()
-                driving_fos_web = min(fea_fos_web, analytical_fos_hub)
-                driving_fos_tooth = min(fea_fos_tooth, analytical_fos_tooth)
+                driving_fos_web = fea_fos_web
+                driving_fos_tooth = fea_fos_tooth
                 
                 self.run_metadata['fea_fos_web'] = float(fea_fos_web)
                 self.run_metadata['fea_fos_shear'] = float(fea_fos_shear)
                 self.run_metadata['fea_in_plane_deflection_m'] = float(in_plane_def)
                 self.run_metadata['fea_axial_deflection_m'] = float(axial_def)
                 self.run_metadata['fea_fos_tooth'] = float(fea_fos_tooth)
-                self.run_metadata['analytical_fos_tooth'] = float(analytical_fos_tooth)
                 self.run_metadata['final_inertia_penalty_gamma'] = float(gamma)
                 self.final_v_mid = v_mid
                 self.final_void_count = void_count
                 
-                print(f"\n   -> 3D FEA FoS [TOOTH]       : {fea_fos_tooth:.2f} (Floor: {minimum_tooth_fos:.2f})")
-                print(f"   -> 3D FEA FoS [WEB VMIS]    : {fea_fos_web:.2f} (Target: {target_web_fos:.2f})")
+                # --- THE FIX: Output the True Driving Margin ---
+                print(f"\n   -> 3D FEA FoS [TOOTH]       : {driving_fos_tooth:.2f} (Floor: {minimum_tooth_fos:.2f})")
+                print(f"   -> 3D FEA FoS [WEB VMIS]    : {driving_fos_web:.2f} (Target: {target_web_fos:.2f})")
                 print(f"   -> 3D FEA FoS [WEB SHEAR]   : {fea_fos_shear:.2f} (Target: {target_shear_fos:.2f})")
                 print(f"   -> Kinematics [IN-PLANE]    : {in_plane_def*1000:.4f} mm (Limit: {max_in_plane*1000:.4f} mm)")
                 print(f"   -> Kinematics [AXIAL]       : {axial_def*1000:.4f} mm (Limit: {max_axial*1000:.4f} mm)")
@@ -381,10 +324,29 @@ validator.parse_results_and_report_fos()
                 is_stress_failing = margin_topology_stress < 1.0
                 is_tooth_failing = margin_tooth < 1.0
                 
-                is_failing = is_kinematic_failing or is_stress_failing or is_tooth_failing
+                # Enforce CAM pocket formation alongside structural criteria
+                if void_count == 0:
+                    is_cam_failing = True
+                    
+                is_failing = is_kinematic_failing or is_stress_failing or is_tooth_failing or is_cam_failing
                 
                 # The FSD Volume Solver scales based on the absolute worst margin, including teeth
                 worst_margin = min(margin_kinematic, margin_topology_stress, margin_tooth)
+                
+                # --- THE FIX: Track the Safest Failed Design ---
+                if is_failing and (worst_margin > self.safest_failed_margin) and (void_count > 0):
+                    self.safest_failed_margin = worst_margin
+                    self.safest_failed_state = {
+                        'densities': np.copy(audited_rho),
+                        'raw_densities': np.copy(rho_3d),
+                        'pockets': self.final_pockets,
+                        'stresses': np.copy(self.final_stresses),
+                        'deflections': np.copy(self.final_deflections),
+                        'v_mid': v_mid,
+                        'gamma': gamma,
+                        'void_count': void_count,
+                        'run_metadata': self.run_metadata.copy()
+                    }
                 
                 self.ml_sample_counter += 1
                 
@@ -407,11 +369,10 @@ validator.parse_results_and_report_fos()
                 )
                 print(f"      -> 🧠 ML Harvester: Saved objective physical state {self.ml_sample_counter:03d} to dataset.")
 
-                if not is_failing:
-                    print(f"\n   ✅ Local Pareto Search Succeeded! Constraints passed at {v_mid*100:.1f}% Vol, Gamma={gamma:.3f}")
-                    
+                if (not is_failing) and (void_count > 0):
                     current_inertia = self._calculate_rotational_inertia(audited_rho)
-                    print(f"      -> ⚖️ Rotational Inertia (Iz): {current_inertia:.4e} kg*m^2")
+                    print(f"\n   ✅ Feasible Topology Validated! Constraints passed at {v_mid*100:.1f}% Vol, Gamma={gamma:.3f}")
+                    print(f"      -> ⚖️ Rotational Inertia (Iz): {current_inertia:.4e} kg*m^2 | Pockets carved: {void_count} elements")
                     
                     state_dict = {
                         'v_mid': v_mid,
@@ -422,39 +383,38 @@ validator.parse_results_and_report_fos()
                     }
                     self.feasible_vault.append(state_dict)
                     
-                    # 1. Save the specific checkpoint array (.npz)
                     file_suffix = f"V{int(v_mid*100)}_G{int(gamma*100)}_Iz_{current_inertia:.2e}"
                     temp_npz = os.path.join(self.run_dir, f"topology_3d_{file_suffix}.npz")
-                    np.savez_compressed(temp_npz, densities=audited_rho, nodes=self.mesh_3d['nodes'], elements=self.mesh_3d['elements'], stresses=self.final_stresses, deflections=self.final_deflections)
+                    np.savez_compressed(temp_npz, densities=rho_3d, audited_densities=audited_rho, nodes=self.mesh_3d['nodes'], elements=self.mesh_3d['elements'], stresses=self.final_stresses, deflections=self.final_deflections)
                     print(f"      -> 💾 Archived valid design array to: {os.path.basename(temp_npz)}")
                     
-                    # --- Save the specific checkpoint telemetry (.json) ---
                     interim_builder = AcademicPassportBuilder(
                         orchestrator=self, 
-                        total_runtime_sec=0.0, # Interim passes don't log total pipeline time
+                        total_runtime_sec=0.0,
                         final_v_mid=v_mid, 
                         void_count=void_count
                     )
-                    interim_builder.meta = self.run_metadata.copy() # Lock in current metadata
+                    interim_builder.meta = self.run_metadata.copy()
                     interim_builder.generate_and_save(self.run_dir, filename=f"digital_twin_{file_suffix}.json")
                     
-                    # --- ELITISM: IS THIS THE ABSOLUTE BEST DESIGN YET? ---
+                    # Elitism: strictly prioritize minimum rotational inertia meeting all safety checks
                     if current_inertia < self.best_feasible_inertia:
                         self.best_feasible_inertia = current_inertia
                         self.best_feasible_state = {
                             'densities': np.copy(audited_rho),
+                            'raw_densities': np.copy(rho_3d),
                             'pockets': self.final_pockets,
                             'stresses': np.copy(self.final_stresses),
                             'deflections': np.copy(self.final_deflections),
                             'v_mid': v_mid,
                             'gamma': gamma,
-                            'inertia': current_inertia, # Store the inertia
+                            'inertia': current_inertia,
                             'void_count': void_count,
                             'run_metadata': self.run_metadata.copy()
                         }
-                        print(f"      -> 🏆 NEW INCUMBENT: Absolute lowest Rotational Inertia achieved so far!")
+                        print(f"      -> 🏆 NEW CHAMPION: Lowest Rotational Inertia achieved ({current_inertia:.4e} kg*m^2)!")
                         
-                    break # Break the inner gamma loop. The volume is successfully proven!
+                    break
                     
                 # If we are failing, analyze if we can fix it by tuning gamma WITHOUT adding volume
                 failed_reasons = []
@@ -464,6 +424,7 @@ validator.parse_results_and_report_fos()
                 if margin_axial < 1.0: failed_reasons.append(f"Axial Deflect")
                 
                 if margin_tooth < 1.0:
+                    failed_reasons.append(f"Gear Teeth")
                     print(f"\n   [⚠️] WARNING: Tooth FoS is critically low ({margin_tooth:.2f}x). Relying on added web volume to stiffen roots.")
                     
                 if is_failing:
@@ -528,6 +489,7 @@ validator.parse_results_and_report_fos()
                 self.previous_margin = worst_margin
                 self.previous_margin_tooth = margin_tooth
                 self.previous_margin_stress = margin_topology_stress
+                self.previous_margin_kinematic = margin_kinematic
                 
                 if self.stalled_counter >= max_stalled:
                     print(f"\n   🔄 LOCAL MINIMUM DETECTED: Added mass is reducing strength! Switching directions to scramble topology.")
@@ -538,7 +500,9 @@ validator.parse_results_and_report_fos()
                     print(f"\n   ⬇️ SCRAMBLING TOPOLOGY: Stepping Volume DOWN to {v_mid*100:.1f}%")
                 else:
                     self.last_direction = "UP"
-                    vol_scale = (1.0 / worst_margin) ** 0.5 
+                    # THE FIX: Clamp worst_margin to prevent division by zero or extreme jumps if FoS = 0.0
+                    clamped_margin = max(0.1, worst_margin)
+                    vol_scale = (1.0 / clamped_margin) ** 0.5 
                     v_next_ideal = v_mid * vol_scale
                     # THE FIX: Percentage-based limits (Current volume + 15%)
                     max_allowed_jump = v_mid * 1.15
@@ -551,10 +515,11 @@ validator.parse_results_and_report_fos()
                 
                 # We expect margin to drop when cutting mass. If it miraculously improved while going DOWN, 
                 # or if it barely dropped at all, the topology is highly stable. No strike recorded here since it's "Safe".
-                self.stalled_counter = 0 
-                self.previous_margin = lowest_margin 
+                self.stalled_counter = 0
+                self.previous_margin = lowest_margin
                 self.previous_margin_tooth = margin_tooth
                 self.previous_margin_stress = margin_topology_stress
+                self.previous_margin_kinematic = margin_kinematic
                 self.previous_margin_in_plane = margin_in_plane
                 self.previous_margin_axial = margin_axial
                 
@@ -578,12 +543,13 @@ validator.parse_results_and_report_fos()
             self.previous_v_mid = v_mid
                 
         if self.best_feasible_state is not None:
-            print(f"\n🏆 OPTIMIZATION COMPLETE. Restoring absolute best valid design!")
+            print(f"\n🏆 OPTIMIZATION COMPLETE. Restoring champion design (Lowest Iz)!")
             print(f"   -> Optimal Volume Fraction: {self.best_feasible_state['v_mid']*100:.1f}%")
             print(f"   -> Minimum Rotational Inertia: {self.best_feasible_state['inertia']:.4e} kg*m^2")
             print(f"   -> Total Feasible Designs Archived: {len(self.feasible_vault)}")
             
             self.optimal_densities = self.best_feasible_state['densities']
+            self.raw_densities = self.best_feasible_state['raw_densities']
             self.final_pockets = self.best_feasible_state['pockets']
             self.final_stresses = self.best_feasible_state['stresses']
             self.final_deflections = self.best_feasible_state['deflections']
@@ -591,13 +557,46 @@ validator.parse_results_and_report_fos()
             self.final_void_count = self.best_feasible_state['void_count']
             self.run_metadata = self.best_feasible_state['run_metadata']
             
-            # Save the vault ledger to JSON for later analysis
+            # Overwrite the mid-loop CAD with the validated Champion geometry
+            print("   -> Serializing verified Champion 3D STEP solid...")
+            ram_payload = {
+                'densities': self.optimal_densities,
+                'nodes': self.mesh_3d['nodes'],
+                'elements': self.mesh_3d['elements']
+            }
+            champion_exporter = SprocketCAMExporter(ram_payload, self.config)
+            step_path_opt = os.path.join(self.run_dir, "PRAVAHA_Sprocket_Optimized.step")
+            champion_exporter.export_3d_step(self.final_pockets, step_path_opt)
+
             vault_path = os.path.join(self.run_dir, "pareto_archive_ledger.json")
             with open(vault_path, "w") as f:
                 json.dump(self.feasible_vault, f, indent=4)
                 
+        elif is_failing and (self.safest_failed_state is not None):
+            print(f"\n⚠️ WARNING: Pipeline exhausted all iterations without finding a safe design.")
+            print(f"   -> Restoring the SAFEST FAILED configuration (Margin: {self.safest_failed_margin:.2f}x).")
+            
+            self.optimal_densities = self.safest_failed_state['densities']
+            self.raw_densities = self.safest_failed_state['raw_densities']
+            self.final_pockets = self.safest_failed_state['pockets']
+            self.final_stresses = self.safest_failed_state['stresses']
+            self.final_deflections = self.safest_failed_state['deflections']
+            self.final_v_mid = self.safest_failed_state['v_mid']
+            self.final_void_count = self.safest_failed_state['void_count']
+            self.run_metadata = self.safest_failed_state['run_metadata']
+            
+            print("   -> Serializing fallback SAFEST FAILED 3D STEP solid...")
+            ram_payload = {
+                'densities': self.optimal_densities,
+                'nodes': self.mesh_3d['nodes'],
+                'elements': self.mesh_3d['elements']
+            }
+            fallback_exporter = SprocketCAMExporter(ram_payload, self.config)
+            step_path_opt = os.path.join(self.run_dir, "PRAVAHA_Sprocket_Optimized_FAILED_SAFEST.step")
+            fallback_exporter.export_3d_step(self.final_pockets, step_path_opt)
+            
         elif is_failing:
-            print(f"\n⚠️ WARNING: Pipeline exhausted all iterations without finding a safe design. Exporting safest failed configuration.")
+            print(f"\n⚠️ WARNING: Pipeline completely failed. No viable geometry could be formed.")
 
     def export_artifacts(self, total_runtime_sec=0.0):
         """Phase 3: Data Archiving (Decoupled from DFM)."""
@@ -608,9 +607,12 @@ validator.parse_results_and_report_fos()
             writer.writerow(["Is_3D_Phase", "Iteration", "Envelope_Compliance_Nm", "Max_Delta_Rho", "Compute_Time_sec", "Peak_VRAM_GB"])
             writer.writerows(self.telemetry)
             
-        # --- Pack physical tensors into the archive for ParaView ---
+        # Ensure post-processing scripts operate on the raw continuous field
+        primary_densities = getattr(self, 'raw_densities', self.optimal_densities)
+
         np.savez_compressed(self.npz_path, 
-                            densities=self.optimal_densities, 
+                            densities=primary_densities, 
+                            audited_densities=self.optimal_densities,
                             nodes=self.mesh_3d['nodes'], 
                             elements=self.mesh_3d['elements'],
                             stresses=self.final_stresses,

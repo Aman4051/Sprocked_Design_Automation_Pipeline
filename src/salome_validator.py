@@ -420,12 +420,12 @@ F mess {safe_mess} R 6
             R_pitch_m = float(self.payload.get('R_pitch', 0.100))
             roller_rad_m = (float(self.config.get('kinematics', {}).get('roller_dia_inch', 0.335)) * 0.0254) / 2.0
             
-            # The "Tooth Zone" is anything outward from the root diameter
             R_root_m = R_pitch_m - roller_rad_m
             tooth_mask = radii >= (R_root_m - 0.002) # Added a small 2mm buffer inwards
             web_mask = ~tooth_mask
-            
+        
             max_tooth_stress_pa = 1.0
+            max_tooth_tresca_pa = 1.0 # Initialize the tooth shear tracker
             
             for prefix in prefixes:
                 # 1. Extract Stresses (VMIS and TRESCA are components of SIEQ_NOEU)
@@ -433,10 +433,10 @@ F mess {safe_mess} R 6
                     field_stress = mc.MEDFileFieldMultiTS(self.rmed_path, f"{prefix}_SIEQ_NOEU")
                     arr = field_stress.getTimeSteps()
                     ts = field_stress.getTimeStep(arr[-1][0], arr[-1][1])
-                    
+                
                     data_arr = ts.getUndergroundDataArray()
                     data_np = data_arr.toNumPyArray()
-                    
+                
                     vmis_col, tresca_col = 0, 1
                     try:
                         comps = [data_arr.getInfoOnComponent(i)[0] for i in range(data_arr.getNumberOfComponents())]
@@ -447,13 +447,14 @@ F mess {safe_mess} R 6
                         
                     vmis_array = data_np[:, vmis_col]
                     tresca_array = data_np[:, tresca_col] if data_np.shape[1] > 1 else vmis_array
-                    
+                
                     percentile_val = float(self.config.get('constraints', {}).get('stress_singularity_filter_percentile', 98.0))
-                    
+                
                     # --- THE FIX: Split the arrays based on the physical masks ---
                     web_vmis = vmis_array[web_mask]
                     tooth_vmis = vmis_array[tooth_mask]
                     web_tresca = tresca_array[web_mask]
+                    tooth_tresca = tresca_array[tooth_mask] # Extract tooth shear field
                     
                     # 1. Evaluate the topology (Web)
                     if len(web_vmis) > 0:
@@ -468,7 +469,7 @@ F mess {safe_mess} R 6
                     if len(tooth_vmis) > 0:
                         local_tooth_max = float(np.percentile(tooth_vmis, percentile_val))
                         if local_tooth_max > max_tooth_stress_pa:
-                            max_tooth_stress_pa = local_tooth_max
+                            max_tooth_tresca_pa = max(max_tooth_tresca_pa, float(np.percentile(tooth_tresca, percentile_val)))
                             
                     fields_found += 1
                 except Exception:
@@ -508,22 +509,29 @@ F mess {safe_mess} R 6
                 raise RuntimeError("MEDCoupling could not locate the 8-character padded stress fields (res_bol_ / res_eol_) in the Code_Aster output.")
             
             Sy_derated = float(self.payload.get('Sy_derated', 503e6))
+            S_sy = 0.5 * Sy_derated
             
             # --- CALCULATE FACTORS OF SAFETY ---
             fos_vmis = Sy_derated / max_stress_pa
-            fos_tooth = Sy_derated / max_tooth_stress_pa
             
-            # Tresca Maximum Shear Theory: Tau_max = Tresca / 2. Yield limit in shear is ~0.5 * Sy
-            tau_max = max_tresca_pa / 2.0
-            S_sy = 0.5 * Sy_derated
-            fos_shear = S_sy / tau_max
+            # Tresca Maximum Shear Theory: Tau_max = Tresca / 2.
+            tau_max_web = max_tresca_pa / 2.0
+            fos_shear = S_sy / tau_max_web
+            
+            # Evaluate Tooth Bending (VMIS) and Tooth Stripping (Shear)
+            fos_tooth_bending = Sy_derated / max_tooth_stress_pa
+            tau_max_tooth = max_tooth_tresca_pa / 2.0
+            fos_tooth_shear = S_sy / tau_max_tooth
+            
+            # The limiting factor for the teeth is the worst of the two
+            fos_tooth = min(fos_tooth_bending, fos_tooth_shear)
             
             output_data = {
                 "fos": fos_vmis,             
                 "fos_tooth": fos_tooth,       
                 "max_stress_pa": max_stress_pa,
                 "fos_shear": fos_shear,
-                "max_shear_pa": tau_max,
+                "max_shear_pa": tau_max_web,
                 "max_in_plane_deflection_m": max_in_plane_deflection_m,
                 "max_axial_deflection_m": max_axial_deflection_m
             }
@@ -534,7 +542,8 @@ F mess {safe_mess} R 6
             np.savez_compressed(self.point_cloud_path, coords=coords, vmis=worst_case_vmis)
             
             print(f"      -> FEA Extraction Success: Worst-Case Max Stress = {max_stress_pa/1e6:.2f} MPa, FoS = {fos_vmis:.2f}")
-            print(f"      -> Shear Assessment: Max Tresca Shear = {tau_max/1e6:.2f} MPa, Shear FoS = {fos_shear:.2f}")
+            print(f"      -> Shear Assessment: Max Tresca Shear = {tau_max_web/1e6:.2f} MPa, Shear FoS = {fos_shear:.2f}")
+            print(f"      -> Tooth Integrity: Bending FoS = {fos_tooth_bending:.2f}, Shear (Stripping) FoS = {fos_tooth_shear:.2f}")
             print(f"      -> Kinematics: Max In-Plane Deflection = {max_in_plane_deflection_m*1000:.3f} mm, Max Axial Deflection = {max_axial_deflection_m*1000:.3f} mm")
 
         except Exception as e:

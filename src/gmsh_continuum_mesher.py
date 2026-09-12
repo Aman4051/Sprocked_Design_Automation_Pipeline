@@ -360,6 +360,7 @@ class GmshContinuumMesher3D:
 
     def _apply_pillar_1_bounds(self, elements_centroids):
         bounds_min = np.full(len(elements_centroids), 0.01)
+        bounds_max = np.ones(len(elements_centroids))
         r_cents = np.hypot(elements_centroids[:, 0], elements_centroids[:, 1])
         
         # 1. Lock Teeth
@@ -369,15 +370,39 @@ class GmshContinuumMesher3D:
         # --- Hub Radius Locks ---
         if self.sprocket_type in ['A', 'B', 'C']:
             # Lock entire central hub to 1.0 density
-            bounds_min[r_cents <= self.hub_rad_m] = 1.0
+            hub_mask = r_cents <= self.hub_rad_m
+            bounds_min[hub_mask] = 1.0
+            
+            # Absolute Void Protection for Continuous Hubs
+            bore_mask = r_cents <= (self.bore_rad_m - 0.0005)
+            bounds_max[bore_mask] = 0.01
+            bounds_min[bore_mask] = 0.01 # Prevent boundary conflict
+            
         elif self.sprocket_type == 'D' and self.num_bolts > 0:
             for i in range(self.num_bolts):
                 angle = i * (2.0 * math.pi / self.num_bolts)
                 bx, by = (self.bolt_pcd_m / 2.0) * math.cos(angle), (self.bolt_pcd_m / 2.0) * math.sin(angle)
                 dist = np.hypot(elements_centroids[:, 0] - bx, elements_centroids[:, 1] - by)
-                bounds_min[dist <= self.boss_rad_m] = 1.0
                 
-        return bounds_min, np.ones(len(elements_centroids)), np.sum(bounds_min == 1.0)
+                # --- THE FIX: Prevent Spoke Severing ---
+                # Since the 2D mesh proxy is a solid plate, we MUST mathematically force the 
+                # bolt holes to be voids, or the AI will route load-bearing spokes right through them.
+                
+                # 1. Solid Boss Ring (Metal)
+                boss_mask = (dist <= self.boss_rad_m) & (dist > (self.bolt_dia_m / 2.0))
+                bounds_min[boss_mask] = 1.0
+                
+                # 2. Physical Bolt Hole (Void)
+                hole_mask = dist <= (self.bolt_dia_m / 2.0)
+                bounds_max[hole_mask] = 0.01
+                bounds_min[hole_mask] = 0.01 # Clear min bound so it overrides the default 0.01 safety
+                
+            # Absolute Void Protection for central axle bore
+            bore_mask = r_cents <= (self.bore_rad_m - 0.0005)
+            bounds_max[bore_mask] = 0.01
+            bounds_min[bore_mask] = 0.01
+                
+        return bounds_min, bounds_max, np.sum(bounds_min == 1.0)
 
     def _calculate_tet4_kinematics(self, nodes, elements):
         """Vectorized 3D Volume and B-Matrix Tensor Assembly."""
@@ -493,7 +518,7 @@ class GmshContinuumMesher3D:
         areas = 0.5 * np.abs(p1[:,0]*(p2[:,1]-p3[:,1]) + p2[:,0]*(p3[:,1]-p1[:,1]) + p3[:,0]*(p1[:,1]-p2[:,1]))
         
         elem_centroids = (p1 + p2 + p3) / 3.0
-        b_min, b_max, count = self._apply_pillar_1_bounds(elem_centroids)
+        b_min, b_max, _ = self._apply_pillar_1_bounds(elem_centroids)
         
         gmsh.clear()
         print(f"   ✅ 2D Tri3 Mesh Complete: {len(nodes_2d)} Nodes, {len(elements_2d)} Elements.")

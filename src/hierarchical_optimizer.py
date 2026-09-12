@@ -113,10 +113,17 @@ class HierarchicalTopologyOptimizer:
             rho_erode = cp.maximum(rho_erode, 0.01)
 
             # --- SOLVE PHASE VRAM TRACKING ---
-            U_BOL = fem_engine.assemble_and_solve(rho_erode, F_BOL_gpu, is_BOL=True)
-            U_EOL = fem_engine.assemble_and_solve(rho_erode, F_EOL_gpu, is_BOL=False)
+            if hasattr(fem_engine, 'assemble_stiffness'):
+                K_free, M_op = fem_engine.assemble_stiffness(rho_erode)
+                U_BOL, iters_BOL = fem_engine.solve_system(K_free, M_op, F_BOL_gpu, is_BOL=True, progress=progress)
+                U_EOL, iters_EOL = fem_engine.solve_system(K_free, M_op, F_EOL_gpu, is_BOL=False, progress=progress)
+            else:
+                U_BOL, iters_BOL = fem_engine.assemble_and_solve(rho_erode, F_BOL_gpu, is_BOL=True, progress=progress)
+                U_EOL, iters_EOL = fem_engine.assemble_and_solve(rho_erode, F_EOL_gpu, is_BOL=False, progress=progress)
+            
             vram_solve = cp.get_default_memory_pool().used_bytes() / (1024**3)
             
+            # --- COMPLIANCE CALCULATION ---
             comp_BOL = float(cp.sum(F_BOL_gpu[fem_engine.free_dofs] * U_BOL[fem_engine.free_dofs]))
             comp_EOL = float(cp.sum(F_EOL_gpu[fem_engine.free_dofs] * U_EOL[fem_engine.free_dofs]))
             total_comp = comp_BOL + comp_EOL
@@ -162,14 +169,21 @@ class HierarchicalTopologyOptimizer:
                 B = (-filtered_sens) / (l_mid * vols_gpu)
                 B = cp.maximum(B, 1e-10) 
                 
-                # Apply Dynamic Damping & Move Limits
+                # Apply Dynamic Damping 
                 B_pow = B ** dynamic_eta_damping
+                rho_raw = rho * B_pow
                 
+                # --- THE FIX: Sync Sectors BEFORE Physical Bounds ---
+                # Apply the rotational symmetry to the raw mathematical design space first
+                rho_sym = rho_raw[fem_engine.cyclic_map_gpu]
+                
+                # --- ENFORCE NON-DESIGN SPACE BOUNDARIES ---
+                # Apply the physical move limits, teeth locks, and boss locks ON TOP of the 
+                # symmetric field. This ensures that even if a 41-tooth perimeter is asymmetric, 
+                # the teeth and bosses are strictly preserved and welded to the symmetric web.
                 rho_upper = cp.minimum(b_max_gpu, rho + dynamic_move_limit)
                 rho_lower = cp.maximum(cp.maximum(b_min_gpu, 0.01), rho - dynamic_move_limit)
-                rho_new = cp.maximum(rho_lower, cp.minimum(rho_upper, rho * B_pow))
-                
-                rho_new = rho_new[fem_engine.cyclic_map_gpu]
+                rho_new = cp.maximum(rho_lower, cp.minimum(rho_upper, rho_sym))
                 
                 if cp.sum(rho_new * vols_gpu) > target_vol_abs:
                     l1 = l_mid

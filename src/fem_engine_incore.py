@@ -189,10 +189,7 @@ class FEMEngineInCoreGPU:
         p_global = cp.zeros(self.num_dofs, dtype=cp.float64)
         p_global[self.free_dofs] = p_free
         
-        q_global = cp.zeros(self.num_dofs, dtype=cp.float64)
-        
         # Reuse preallocated buffers to eliminate VRAM allocation latency
-        # (You must preallocate self.p_global_buf and self.q_global_buf in __init__)
         self.p_global_buf.fill(0.0)
         self.p_global_buf[self.free_dofs] = p_free
         
@@ -206,18 +203,16 @@ class FEMEngineInCoreGPU:
             self.p_global_buf.data.ptr,
             self.q_global_buf.data.ptr,
             self.num_elements,
-            self.num_dofs,                   # <-- THE FIX: Pass boundary length
+            self.num_dofs,                   
             float(self.p_penalty) 
         )
         
         return self.q_global_buf[self.free_dofs]
-        
-        return q_global[self.free_dofs]
 
     def assemble_and_solve(self, densities, F_ext_gpu, is_BOL=True):
         """Executes the Preconditioned Conjugate Gradient (JPCG) loop."""
         solve_start = time.time()
-        densities_gpu = cp.array(densities, dtype=cp.float64)
+        densities_gpu = cp.asarray(densities, dtype=cp.float64)
         
         # 1. Prepare Boundaries
         F_free = F_ext_gpu[self.free_dofs]
@@ -269,10 +264,11 @@ class FEMEngineInCoreGPU:
             x0_guess = self.U_prev_EOL[self.free_dofs]
             
         cg_tol = float(self.config.get('optimization_solver', {}).get('cg_tolerance', 5e-3))
+        dynamic_tol = cg_tol + (0.01 - cg_tol) * (1.0 - progress)
         
         # Hard-capping the iterations at 5000. 
         # Exiting early provides a perfectly valid gradient direction for SIMP.
-        U_free, info = cplinalg.cg(A_op, F_free, M=M_op, x0=x0_guess, tol=cg_tol, maxiter=5000, callback=tracker)
+        U_free, info = cplinalg.cg(A_op, F_free, M=M_op, x0=x0_guess, tol=dynamic_tol, maxiter=5000, callback=tracker)
         
         if tracker.iters == 0 and info > 0:
             tracker.iters = info
@@ -292,7 +288,7 @@ class FEMEngineInCoreGPU:
 
     def calculate_sensitivities(self, U_global, densities):
         """Analytical Adjoint Method: Evaluates structural compliance sensitivity."""
-        densities_gpu = cp.array(densities, dtype=cp.float64)
+        densities_gpu = cp.asarray(densities, dtype=cp.float64)
         
         # 1. Zero-Copy SoA gather: extracts nodal displacements directly as (12, E)
         U_elem_soa = U_global[self.elem_dofs_gpu_soa]
