@@ -1,0 +1,45 @@
+{
+    "metadata": {
+        "timestamp": "2026-07-26T22:23:50.662783",
+        "solver_engine": "PRAVAHA_V2_3D_Continuum_GPU",
+        "optimization_strategy": "Bisection with CNC Heaviside Projection",
+        "target_volume_fraction": 0.36463778861815155
+    },
+    "sprocket_architecture": {
+        "asme_b29_1_type": "C",
+        "pitch_inch": 0.5,
+        "num_teeth": 68,
+        "num_bolts": 4,
+        "bolt_pcd_m": 0.081
+    },
+    "physics_boundary_conditions": {
+        "chain_tension_peak_n": 1212.4154281412461,
+        "engaged_teeth_count": 41,
+        "chain_velocity_m_s": 16.51,
+        "derated_yield_strength_pa": 503000000.0,
+        "derated_youngs_modulus_pa": 71700000000.0
+    },
+    "computational_mesh_metrics": {
+        "total_nodes": 293706,
+        "total_tetrahedral_elements": 1459167,
+        "cnc_machining_projection": {
+            "snapped_void_voxels": 496935,
+            "percentage_voxels_machined_away": 34.05607445892074
+        }
+    },
+    "geometric_mass_metrics": {
+        "solid_baseline_mass_kg": 1.1682311322718433,
+        "optimized_machined_mass_kg": 0.42598121666648425,
+        "true_converged_volume_fraction": 0.36463778861815155
+    },
+    "structural_integrity_audit": {
+        "certified_factors_of_safety": {
+            "web_3d_continuum_fos": 3.347696338436348,
+            "tooth_3d_continuum_fos": 3.347696338436348,
+            "tooth_analytical_lewis_fos": 12.902240903784715
+        }
+    },
+    "computational_cost": {
+        "total_wall_clock_time_seconds": 0.0
+    }
+}

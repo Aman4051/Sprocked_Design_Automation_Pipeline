@@ -1,0 +1,62 @@
+[
+    {
+        "v_mid": 0.525,
+        "gamma": 0.12013926031165556,
+        "inertia": 0.0057721659580168136,
+        "void_count": 384229,
+        "run_metadata": {
+            "fea_fos_web": 2.261170089744286,
+            "fea_fos_shear": 1.9763868968628142,
+            "fea_in_plane_deflection_m": 3.6794588549588304e-05,
+            "fea_axial_deflection_m": 0.00010544473615660718,
+            "fea_fos_tooth": 2.261170089744286,
+            "analytical_fos_tooth": 12.902240903784715,
+            "final_inertia_penalty_gamma": 0.12013926031165556
+        }
+    },
+    {
+        "v_mid": 0.5178500562771304,
+        "gamma": 0.10764932692751963,
+        "inertia": 0.005756724474421524,
+        "void_count": 393860,
+        "run_metadata": {
+            "fea_fos_web": 2.5630266750186284,
+            "fea_fos_shear": 2.2307535332140294,
+            "fea_in_plane_deflection_m": 3.677894412940626e-05,
+            "fea_axial_deflection_m": 0.00010859821208897866,
+            "fea_fos_tooth": 2.5630266750186284,
+            "analytical_fos_tooth": 12.902240903784715,
+            "final_inertia_penalty_gamma": 0.10764932692751963
+        }
+    },
+    {
+        "v_mid": 0.4797763157161829,
+        "gamma": 0.10764932692751963,
+        "inertia": 0.005432431471963312,
+        "void_count": 449546,
+        "run_metadata": {
+            "fea_fos_web": 3.074743498556941,
+            "fea_fos_shear": 2.6766612057961603,
+            "fea_in_plane_deflection_m": 4.4199506193029816e-05,
+            "fea_axial_deflection_m": 0.00011981061501684468,
+            "fea_fos_tooth": 3.074743498556941,
+            "analytical_fos_tooth": 12.902240903784715,
+            "final_inertia_penalty_gamma": 0.10764932692751963
+        }
+    },
+    {
+        "v_mid": 0.40583144983152253,
+        "gamma": 0.10764932692751963,
+        "inertia": 0.00488729671767657,
+        "void_count": 531187,
+        "run_metadata": {
+            "fea_fos_web": 2.6895407346837943,
+            "fea_fos_shear": 2.3540805534459484,
+            "fea_in_plane_deflection_m": 5.608533557697382e-05,
+            "fea_axial_deflection_m": 0.0001416179686215503,
+            "fea_fos_tooth": 2.6895407346837943,
+            "analytical_fos_tooth": 12.902240903784715,
+            "final_inertia_penalty_gamma": 0.10764932692751963
+        }
+    }
+]

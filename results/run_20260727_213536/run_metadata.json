@@ -1,0 +1,9 @@
+{
+    "fea_fos_web": 2.6895407346837943,
+    "fea_fos_shear": 2.3540805534459484,
+    "fea_in_plane_deflection_m": 5.608533557697382e-05,
+    "fea_axial_deflection_m": 0.0001416179686215503,
+    "fea_fos_tooth": 2.6895407346837943,
+    "analytical_fos_tooth": 12.902240903784715,
+    "final_inertia_penalty_gamma": 0.10764932692751963
+}
