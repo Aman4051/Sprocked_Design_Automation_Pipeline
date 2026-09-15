@@ -1,0 +1,30 @@
+[
+    {
+        "v_mid": 0.525,
+        "gamma": 0.15,
+        "inertia": 0.0035097884171400077,
+        "void_count": 106531,
+        "run_metadata": {
+            "fea_fos_web": 2.7167404247069307,
+            "fea_fos_shear": 2.6523155948345636,
+            "fea_in_plane_deflection_m": 0.000128696710092686,
+            "fea_axial_deflection_m": 0.0001837257897813529,
+            "fea_fos_tooth": 1.1008184938925933,
+            "final_inertia_penalty_gamma": 0.15
+        }
+    },
+    {
+        "v_mid": 0.5248047865286745,
+        "gamma": 0.08391821586031975,
+        "inertia": 0.0035150294163162326,
+        "void_count": 106247,
+        "run_metadata": {
+            "fea_fos_web": 2.696391535650842,
+            "fea_fos_shear": 2.627069338779539,
+            "fea_in_plane_deflection_m": 0.0001275802089862902,
+            "fea_axial_deflection_m": 0.00018615057445275254,
+            "fea_fos_tooth": 1.1026824150590078,
+            "final_inertia_penalty_gamma": 0.08391821586031975
+        }
+    }
+]
