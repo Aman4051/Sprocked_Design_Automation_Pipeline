@@ -49,13 +49,15 @@ class HierarchicalTopologyOptimizer:
         
         rho = cp.array(rho_init, dtype=cp.float64)
         
-        # The 3D engine stores RCM-permuted forces. The 2D engine uses raw node order.
-        if hasattr(fem_engine, 'F_BOL_gpu'):
+        # --- FORCE PERMUTATION ALIGNMENT ---
+        # 3D: Forces are RCM-permuted and cached in fem_engine.F_BOL_gpu.
+        # 2D: Forces are already RCM-permuted upstream in the mesher (fem_engine.mesh).
+        if hasattr(fem_engine, 'F_BOL_gpu') and fem_engine.F_BOL_gpu is not None:
             F_BOL_gpu = fem_engine.F_BOL_gpu
             F_EOL_gpu = fem_engine.F_EOL_gpu
         else:
-            F_BOL_gpu = cp.array(fem_engine.mesh['F_ext_BOL'], dtype=cp.float64)
-            F_EOL_gpu = cp.array(fem_engine.mesh['F_ext_EOL'], dtype=cp.float64)
+            F_BOL_gpu = cp.asarray(fem_engine.mesh['F_ext_BOL'], dtype=cp.float64)
+            F_EOL_gpu = cp.asarray(fem_engine.mesh['F_ext_EOL'], dtype=cp.float64)
 
         if not hasattr(fem_engine, 'H_gpu'):
             print("      -> Initializing Persistent Static Filter & Symmetry Maps...")
@@ -112,14 +114,9 @@ class HierarchicalTopologyOptimizer:
             rho_blue = cp.maximum(rho_blue, 0.01)
             rho_erode = cp.maximum(rho_erode, 0.01)
 
-            # --- SOLVE PHASE VRAM TRACKING ---
-            if hasattr(fem_engine, 'assemble_stiffness'):
-                K_free, M_op = fem_engine.assemble_stiffness(rho_erode)
-                U_BOL, iters_BOL = fem_engine.solve_system(K_free, M_op, F_BOL_gpu, is_BOL=True, progress=progress)
-                U_EOL, iters_EOL = fem_engine.solve_system(K_free, M_op, F_EOL_gpu, is_BOL=False, progress=progress)
-            else:
-                U_BOL, iters_BOL = fem_engine.assemble_and_solve(rho_erode, F_BOL_gpu, is_BOL=True, progress=progress)
-                U_EOL, iters_EOL = fem_engine.assemble_and_solve(rho_erode, F_EOL_gpu, is_BOL=False, progress=progress)
+            # --- SOLVE PHASE VRAM TRACKING (Harmonized Matrix-Free Execution) ---
+            U_BOL, iters_BOL = fem_engine.assemble_and_solve(rho_erode, F_BOL_gpu, is_BOL=True, progress=progress)
+            U_EOL, iters_EOL = fem_engine.assemble_and_solve(rho_erode, F_EOL_gpu, is_BOL=False, progress=progress)
             
             vram_solve = cp.get_default_memory_pool().used_bytes() / (1024**3)
             

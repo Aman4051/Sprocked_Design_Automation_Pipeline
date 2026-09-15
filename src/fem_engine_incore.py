@@ -151,16 +151,17 @@ class FEMEngineInCoreGPU:
         # Extract the diagonal for the Jacobi Preconditioner (Shape: E x 12)
         self.K0_diag_gpu = cp.diagonal(K_full, axis1=1, axis2=2)
         
-        # Flatten to AoS (E, 144)
-        K0_gpu = K_full.reshape(self.num_elements, 144)
+        # --- SYMMETRIC MEMORY COMPRESSION (78 Values per element) ---
+        triu_r, triu_c = np.triu_indices(12)
+        Ke0_sym = K_full[:, triu_r, triu_c] # Shape: (num_elements, 78)
         
         # --- THE MEMORY COALESCING FIX (SoA) ---
-        # Create transposed copies (144, E) exclusively for the CUDA Kernel to achieve 500+ GB/s
-        self.K0_gpu_soa = cp.ascontiguousarray(K0_gpu.T)
+        # Create transposed copies (78, E) exclusively for the CUDA Kernel to hit max bandwidth
+        self.K0_gpu_soa = cp.ascontiguousarray(Ke0_sym.T)
         self.elem_dofs_gpu_soa = cp.ascontiguousarray(self.elem_dofs_gpu.T)
         
-        # Delete the AoS matrices to free memory
-        del K0_gpu
+        # Delete the full matrices to free memory
+        del Ke0_sym
         del K_full
 
     def _build_jacobi_preconditioner(self, densities_gpu):
@@ -293,14 +294,30 @@ class FEMEngineInCoreGPU:
         # 1. Zero-Copy SoA gather: extracts nodal displacements directly as (12, E)
         U_elem_soa = U_global[self.elem_dofs_gpu_soa]
         
-        # 2. Memory-Efficient SoA Contraction
+        # 2. Memory-Efficient SoA Contraction with Symmetric Unpacking
         # We compute u^T * K0 * u via a fast unrolled loop over the 12 DOFs to restrict peak VRAM.
         strain_energy_unpenalized = cp.zeros(self.num_elements, dtype=cp.float64)
         
+        lut_12x12 = np.array([
+             0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11,
+             1, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+             2, 13, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+             3, 14, 24, 33, 34, 35, 36, 37, 38, 39, 40, 41,
+             4, 15, 25, 34, 42, 43, 44, 45, 46, 47, 48, 49,
+             5, 16, 26, 35, 43, 50, 51, 52, 53, 54, 55, 56,
+             6, 17, 27, 36, 44, 51, 57, 58, 59, 60, 61, 62,
+             7, 18, 28, 37, 45, 52, 58, 63, 64, 65, 66, 67,
+             8, 19, 29, 38, 46, 53, 59, 64, 68, 69, 70, 71,
+             9, 20, 30, 39, 47, 54, 60, 65, 69, 72, 73, 74,
+            10, 21, 31, 40, 48, 55, 61, 66, 70, 73, 75, 76,
+            11, 22, 32, 41, 49, 56, 62, 67, 71, 74, 76, 77
+        ], dtype=np.int32)
+        
         for i in range(12):
-            # K_ij * u_j for the i-th row (Shape: 12 x E)
-            row_dot_u = cp.sum(self.K0_gpu_soa[i*12 : i*12+12, :] * U_elem_soa, axis=0)
-            # Accumulate u_i * (K_ij * u_j)
+            row_dot_u = cp.zeros(self.num_elements, dtype=cp.float64)
+            for j in range(12):
+                sym_idx = int(lut_12x12[i * 12 + j])
+                row_dot_u += self.K0_gpu_soa[sym_idx, :] * U_elem_soa[j, :]
             strain_energy_unpenalized += U_elem_soa[i, :] * row_dot_u
             
         # Sensitivity = -p * rho^(p-1) * (u^T K0 u)

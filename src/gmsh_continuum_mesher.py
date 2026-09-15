@@ -2,6 +2,8 @@ import math
 import numpy as np
 import gmsh
 from scipy.spatial import cKDTree
+import scipy.sparse as sp
+from scipy.sparse.csgraph import reverse_cuthill_mckee
 import cadquery as cq
 import os
 import tempfile
@@ -508,8 +510,27 @@ class GmshContinuumMesher3D:
         
         elem_types, elem_tags, elem_node_tags = gmsh.model.mesh.getElements(dim=2)
         raw_elements = elem_node_tags[list(elem_types).index(2)].reshape(-1, 3)
-        elements_2d = np.array([[node_map[tag] for tag in elem] for elem in raw_elements])
+        elements_2d = np.array([[node_map[tag] for tag in elem] for elem in raw_elements], dtype=np.int32)
         
+        # --- UPSTREAM 2D RCM REORDERING ---
+        print("      -> Executing Reverse Cuthill-McKee (RCM) Node Reordering for VRAM Coalescing...")
+        num_nodes = len(nodes_2d)
+        row_indices = np.repeat(elements_2d, 3, axis=1).flatten()
+        col_indices = np.tile(elements_2d, (1, 3)).flatten()
+        
+        # Use boolean arrays for the graph connections to minimize CPU RAM during meshing
+        adj_matrix = sp.coo_matrix((np.ones(len(row_indices), dtype=np.bool_), 
+                                   (row_indices, col_indices)), 
+                                   shape=(num_nodes, num_nodes)).tocsr()
+                                   
+        perm = reverse_cuthill_mckee(adj_matrix)
+        inv_perm = np.argsort(perm).astype(np.int32)
+        
+        # Apply permutations BEFORE boundary extraction and enforce C-contiguous memory
+        nodes_2d = np.ascontiguousarray(nodes_2d[perm])
+        elements_2d = np.ascontiguousarray(inv_perm[elements_2d])
+        
+        # Boundaries and forces are now naturally mapped to the newly RCM-sorted node order
         fixed_nodes, F_BOL, F_EOL = self._extract_boundaries(nodes_2d, is_3d=False)
         
         p1 = nodes_2d[elements_2d[:, 0]]
